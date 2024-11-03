@@ -1,13 +1,9 @@
-import NextAuth, { AuthOptions, Profile } from 'next-auth';
-import { MongoDBAdapter } from '@auth/mongodb-adapter';
-import clientPromise from '@/db/db';
+import NextAuth, { AuthOptions } from 'next-auth';
 import { getServerSession } from 'next-auth';
 import { JWT as JWTType } from 'next-auth/jwt';
 import { Session as SessionType } from 'next-auth';
 
 export const authOptions: AuthOptions = {
-  // @ts-ignore
-  adapter: MongoDBAdapter(clientPromise),
   secret: process.env.NEXTAUTH_SECRET,
   providers: [
     {
