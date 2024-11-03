@@ -91,7 +91,7 @@ export const authOptions: AuthOptions = {
             token: context.tokens.access_token,
             name: data.Viewer.name,
             sub: data.Viewer.id,
-            image: data.Viewer.avatar,
+            image: data.Viewer.avatar.large,
             createdAt: data.Viewer.createdAt,
             list: data.Viewer?.mediaListOptions.animeList.customLists,
           };
