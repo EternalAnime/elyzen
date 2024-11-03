@@ -1,603 +1,232 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { ANIME, ITitle, META, IAnimeResult } from '@consumet/extensions';
-import { HiAnime } from 'aniwatch';
-import { findBestMatchedAnime } from '@/lib/title';
-import { safeAwait } from '@/lib/promise';
-import { ANIFY_URL } from '@/lib/constants';
+"use server";
+import { ANIME } from "@consumet/extensions";
+import { CombineEpisodeMeta } from "@/utils/EpisodeFunctions";
+import { redis } from "@/lib/rediscache";
+import { getMappings } from "./mappings";
 
-const h = new HiAnime.Scraper();
+const gogo = new ANIME.Gogoanime();
+const zoro = new ANIME.Zoro();
 
-const getAnimeEpisodes = h.getEpisodes;
-
-export const revalidate = 0;
-
-export interface Titles {
-  'x-jat': string;
-  ja: string;
-  en: string;
-  'zh-Hant': string;
-  'zh-Hans': string;
-}
-
-export interface EpisodeTitle {
-  ja: string;
-  en: string;
-  'x-jat': string;
-}
-
-export interface Episode {
-  tvdbShowId: number;
-  tvdbId: number;
-  seasonNumber: number;
-  episodeNumber: number;
-  absoluteEpisodeNumber: number;
-  title: EpisodeTitle;
-  airDate: string;
-  airDateUtc: string;
-  runtime: number;
-  overview: string;
-  image: string;
-  episode: string;
-  anidbEid: number;
-  length: number;
-  airdate: string;
-  rating: string;
-  summary: string;
-}
-
-export interface Episodes {
-  [key: string]: Episode;
-}
-
-export interface Image {
-  coverType: string;
-  url: string;
-}
-
-export interface Mappings {
-  animeplanet_id: string;
-  kitsu_id: number;
-  mal_id: number;
-  type: string;
-  anilist_id: number;
-  anisearch_id: number;
-  anidb_id: number;
-  notifymoe_id: string;
-  livechart_id: number;
-  thetvdb_id: number;
-  imdb_id: string;
-  themoviedb_id: string;
-}
-
-export interface Data {
-  titles: Titles;
-  episodes: Episodes;
-  episodeCount: number;
-  specialCount: number;
-  images: Image[];
-  mappings: Mappings;
-}
-
-export interface MalSiteDetail {
-  identifier: string;
-  image: string;
-  malId: number;
-  aniId: number;
-  page: string;
-  title: string;
-  type: string;
-  url: string;
-  external?: boolean;
-}
-
-export interface MalSites {
-  [key: string]: {
-    [key: string]: MalSiteDetail;
-  };
-}
-
-export interface MalAnime {
-  id: number;
-  type: string;
-  title: string;
-  url: string;
-  total: number;
-  image: string;
-  malId: number;
-  Sites?: MalSites;
-}
-
-export interface AnifyEpisode {
-  id: string;
-  img: string | null;
-  title: string | null;
-  hasDub: boolean | null;
-  rating: string | null;
-  isFiller: boolean | null;
-  updatedAt: number;
-  description: string | null;
-}
-
-export interface AnifyEpisodes {
-  providerId: string;
-  episodes: AnifyEpisode[];
-}
-
-export interface EpisodeData {
-  episodeId: string;
-  id: string;
-  isFiller: boolean | null;
-  img?: string;
-  image?: string;
-  duration?: number;
-}
-
-export interface AnimeEpisodes {
-  providerId: string;
-  sub: EpisodeData[];
-  dub: EpisodeData[];
-}
-
-export interface EpisodeReturn {
-  id: string;
-  title: string;
-  number: number;
-  description: string;
-  isFiller: boolean;
-  thumbnail: string;
-  rating: number;
-  season: number;
-  released: string;
-  tvdbId: number;
-  duration: number;
-}
-
-export interface EpisodeReturnType {
-  providerId: string;
-  episodes: {
-    sub: EpisodeReturn[];
-    dub: EpisodeReturn[];
-  };
-}
-
-const anilist = new META.Anilist();
-
-const formatTitle = (
-  title: ITitle,
-  toReplace: string[],
-  value: string
-): Partial<ITitle> => {
-  return {
-    english: title.english?.toLowerCase().replaceAll(toReplace[0], value),
-    romaji: title.romaji?.toLowerCase().replaceAll(toReplace[1], value),
-    native: title.native?.toLowerCase().replaceAll(toReplace[2], value),
-    userPreferred: title.userPreferred
-      ?.toLowerCase()
-      .replaceAll(toReplace[3], value),
-  };
-};
-
-const searchGogoanime = async (title: string) => {
-  const gogo = new ANIME.Gogoanime('anitaku.pe');
-  const [search, searchError] = await safeAwait(gogo.search(title));
-
-  if (searchError) {
-    console.error(searchError);
-    return null;
-  }
-
-  return search?.results;
-};
-
-const searchZoro = async (title: string) => {
-  const zoro = new ANIME.Zoro();
-
-  const [search, searchError] = await safeAwait(zoro.search(title));
-
-  if (searchError) {
-    console.error(searchError);
-    return null;
-  }
-
-  return search?.results;
-};
-
-const filterResults = (results: IAnimeResult[], isDub: boolean) => {
-  return results.filter((result) =>
-    isDub
-      ? (result.title as string).includes('(Dub)')
-      : !(result.title as string).includes('(Dub)')
-  );
-};
-
-const getGogoanimeMapping = async (
-  id: string
-): Promise<{ sub: string; dub: string }> => {
-  const [info, error] = await safeAwait(anilist.fetchAnimeInfo(id));
-
-  if (error) {
-    console.error(error);
-    return { sub: '', dub: '' };
-  }
-
-  const title = formatTitle(
-    info?.title as ITitle,
-    [
-      'tower of god season 2',
-      'kami no tou: tower of god - ouji no kikan',
-      '神之塔 -tower of god- 王子の帰還',
-      'kami no tou: tower of god - ouji no kikan',
-    ],
-    'Kami no Tou: Ouji no Kikan'
-  );
-  const searchResults = await searchGogoanime(title.english || title.romaji!);
-
-  if (!searchResults) {
-    return { sub: '', dub: '' };
-  }
-
-  const subResult = filterResults(searchResults, false);
-  const dubResult = filterResults(searchResults, true);
-
-  // @ts-ignore
-  const bestSubMatch = findBestMatchedAnime(title, subResult);
-  // @ts-ignore
-  const bestDubMatch = findBestMatchedAnime(title, dubResult);
-
-  return {
-    sub: bestSubMatch?.bestMatch.id || '',
-    dub: bestDubMatch?.bestMatch.id || '',
-  };
-};
-
-const getZoro = async (id: string): Promise<{ id: string }> => {
-  const [info, error] = await safeAwait(anilist.fetchAnimeInfo(id));
-
-  if (error) {
-    console.error(error);
-    return { id: '' };
-  }
-
-  const title = formatTitle(
-    info?.title as ITitle,
-    ['oshi no ko', 'oshi no ko', 'oshi no ko', 'oshi no ko'],
-    'My Star'
-  );
-  const searchResults = await searchZoro(title.english || title.romaji!);
-
-  if (!searchResults) {
-    return { id: '' };
-  }
-
-  // @ts-ignore
-  const best = findBestMatchedAnime(title, searchResults);
-
-  return {
-    id: best?.bestMatch.id || '',
-  };
-};
-
-const getMappings = async (
-  id: string
-): Promise<{ subId: string; dubId: string; hianime: string }> => {
-  if (id === '20455') {
-    return {
-      subId: 'super-sonico-animation',
-      dubId: 'soniani-super-sonico-the-animation-dub',
-      hianime: '',
-    };
-  }
-
-  const googMapPromise = safeAwait(getGogoanimeMapping(id));
-  const zoroMapPromise = safeAwait(getZoro(id));
-
-  const [[gogo, gogoError], [zoro, zoroError]] = await Promise.all([
-    googMapPromise,
-    zoroMapPromise,
-  ]);
-
-  if (gogoError) {
-    gogo!.dub ??= '';
-    gogo!.sub ??= '';
-  }
-
-  if (zoroError) {
-    zoro!.id ??= '';
-  }
-
-  return {
-    subId: gogo?.sub || '',
-    dubId: gogo?.dub || '',
-    hianime: zoro?.id || '',
-  };
-};
-
-async function fetchEpisodeData(animeId: string) {
-  const [response, error] = await safeAwait(
-    fetch(`https://api.ani.zip/mappings?anilist_id=${animeId}`)
-  );
-
-  if (error) {
-    return [] as Episode[];
-  }
-
-  const [data, parseError] = await safeAwait(response?.json() as Promise<Data>);
-
-  if (parseError) {
-    return [] as Episode[];
-  }
-
-  return Object.values(data?.episodes as Episodes) as Episode[];
-}
-
-const gogoProvider = new ANIME.Gogoanime();
-
-async function fetchAnimeEpisodes(animeId: string): Promise<AnimeEpisodes[]> {
+export async function fetchGogoEpisodes(id) {
   try {
-    const { subId, dubId, hianime } = await getMappings(animeId);
+    const data = await gogo.fetchAnimeInfo(id);
 
-    const fetchEpisodes = async (gogoId: string): Promise<EpisodeData[]> => {
-      const [response, error] = await safeAwait(
-        gogoProvider.fetchAnimeInfo(gogoId)
-      );
+    return data?.episodes || [];
+  } catch (error) {
+    console.error("Error fetching gogoanime:", error.message);
+    return [];
+  }
+}
 
-      if (error || !response) {
-        return [];
+export async function fetchZoroEpisodes(id) {
+  try {
+    const data = await zoro.fetchAnimeInfo(id);
+
+    return data?.episodes || [];
+  } catch (error) {
+    console.error("Error fetching zoro:", error.message);
+    return [];
+  }
+}
+
+async function fetchEpisodeMeta(id, available = false) {
+  try {
+    if (available) {
+      return null;
+    }
+    const res = await fetch(
+      `https://api.ani.zip/mappings?anilist_id=${id}`
+    );
+const data = await res.json()
+    const episodesArray = Object.values(data?.episodes);
+
+    if (!episodesArray) {
+      return [];
+    }
+    return episodesArray;
+  } catch (error) {
+    console.error("Error fetching and processing meta:", error.message);
+    return [];
+  }
+}
+
+const fetchAndCacheData = async (id, meta, redis, cacheTime, refresh) => {
+  let mappings;
+  let subEpisodes = [];
+  let dubEpisodes = [];
+  let allepisodes = [];
+
+  if (id) {
+    mappings = await getMappings(id);
+  }
+
+  if (mappings) {
+    if (mappings.gogoanime && Object.keys(mappings.gogoanime).length >= 1) {
+      // Fetch sub episodes if available
+      if (
+        mappings?.gogoanime?.uncensored ||
+        mappings?.gogoanime?.sub ||
+        mappings?.gogoanime?.tv
+      ) {
+        subEpisodes = await fetchGogoEpisodes(
+          mappings?.gogoanime?.uncensored ||
+            mappings.gogoanime.sub ||
+            mappings?.gogoanime?.tv
+        );
       }
 
-      return response.episodes?.map((ep) => ({
-        id: ep.id,
-        isFiller: ep.isFiller ?? false,
-      })) as EpisodeData[];
-    };
+      // Fetch dub episodes if available
+      if (mappings?.gogoanime?.dub) {
+        dubEpisodes = await fetchGogoEpisodes(mappings?.gogoanime?.dub);
+      }
 
-    const [subEpisodes, dubEpisodes, hiAnimeEpisodes] = await Promise.all([
-      subId ? fetchEpisodes(subId) : Promise.resolve([]),
-      dubId ? fetchEpisodes(dubId) : Promise.resolve([]),
-      hianime
-        ? (await safeAwait(getAnimeEpisodes(hianime)))?.[0]?.episodes.map(
-            (ep) => ({
-              id: ep.episodeId,
-              isFiller: ep.isFiller ?? false,
-            })
-          ) || []
-        : Promise.resolve([]),
-    ]);
+      if (subEpisodes?.length > 0 || dubEpisodes?.length > 0) {
+        allepisodes.push({
+          episodes: { sub: subEpisodes, dub: dubEpisodes },
+          providerId: "gogoanime",
+          consumet: true,
+        });
+      }
+    }
+    if (mappings?.zoro && Object.keys(mappings.zoro).length >= 1) {
+      let subEpisodes = [];
 
-    return [
-      {
-        providerId: 'gogoanime',
-        sub: subEpisodes,
-        dub: dubEpisodes,
-      },
-      {
-        providerId: 'hianime',
-        sub: hiAnimeEpisodes as EpisodeData[],
-        dub:
-          dubEpisodes.length > 0
-            ? (hiAnimeEpisodes.slice(0, dubEpisodes.length) as EpisodeData[])
-            : ([] as EpisodeData[]),
-      },
-    ];
-  } catch (error) {
-    console.error(error);
-    return [
-      { providerId: 'gogoanime', sub: [], dub: [] },
-      { providerId: 'hianime', sub: [], dub: [] },
-    ];
+      // Fetch sub episodes if available
+      if (
+        mappings?.zoro?.uncensored ||
+        mappings?.zoro?.sub ||
+        mappings?.zoro?.tv
+      ) {
+        subEpisodes = await fetchZoroEpisodes(
+          mappings?.zoro?.uncensored
+            ? mappings?.zoro?.uncensored
+            : mappings.zoro.sub
+        );
+      }
+      if (subEpisodes?.length > 0) {
+        const transformedEpisodes = subEpisodes.map(episode => ({
+          ...episode,
+          id: transformEpisodeId(episode.id)
+        }));
+      
+        allepisodes.push({
+          episodes: transformedEpisodes,
+          providerId: "zoro",
+        });
+      }
+    }
+  } 
+  const cover = await fetchEpisodeMeta(id, !refresh)
+
+  // Check if redis is available
+  if (redis) {
+    if (allepisodes) {
+      await redis.setex(
+        `episode:${id}`,
+        cacheTime,
+        JSON.stringify(allepisodes)
+      );
+    }
+
+    let data = allepisodes;
+    if (refresh) {
+      if (cover && cover?.length > 0) {
+        try {
+          await redis.setex(`meta:${id}`, cacheTime, JSON.stringify(cover));
+          data = await CombineEpisodeMeta(allepisodes, cover);
+        } catch (error) {
+          console.error("Error serializing cover:", error.message);
+        }
+      } else if (meta) {
+        data = await CombineEpisodeMeta(allepisodes, JSON.parse(meta));
+      }
+    } else if (meta) {
+      data = await CombineEpisodeMeta(allepisodes, JSON.parse(meta));
+    }
+
+    return data;
+  } else {
+    console.error("Redis URL not provided. Caching not possible.");
+    return allepisodes;
   }
-}
-
-async function fetchAnifyEpisodes(animeId: string) {
-  const [response, fetchError] = await safeAwait(
-    fetch(`${ANIFY_URL}/episodes/${animeId}`)
-  );
-
-  if (fetchError || !response) {
-    return {
-      animepahe: { providerId: 'animepahe', episodes: [] } as
-        | AnifyEpisodes
-        | undefined,
-    };
-  }
-
-  const [anifyData, jsonError] = await safeAwait(
-    response.json() as Promise<AnifyEpisodes[]>
-  );
-
-  if (jsonError || !anifyData) {
-    return {
-      animepahe: { providerId: 'animepahe', episodes: [] } as
-        | AnifyEpisodes
-        | undefined,
-    };
-  }
-
-  return {
-    animepahe: anifyData.find(
-      (provider) => provider.providerId === 'animepahe'
-    ),
-  };
-}
-
-interface AnifyTMDBEpisode {
-  id: string;
-  description: string;
-  hasDub: boolean;
-  img: string;
-  isFiller: boolean;
-  number: number;
-  title: string;
-  updatedAt: number;
-  rating: number;
-}
-
-interface AnifyTMDBMetadata {
-  providerId: string;
-  data: AnifyTMDBEpisode[];
-}
-
-async function fetchAnifyTMDBMetadata(
-  animeId: string
-): Promise<AnifyTMDBMetadata[]> {
-  const [response, error] = await safeAwait(
-    fetch(`${ANIFY_URL}/content-metadata/${animeId}`)
-  );
-
-  if (error || !response) {
-    return [];
-  }
-
-  const [data, parseError] = await safeAwait(
-    response.json() as Promise<AnifyTMDBMetadata[]>
-  );
-
-  if (parseError || !data) {
-    return [];
-  }
-
-  return data;
-}
-
-// eslint-disable-next-line consistent-return
-function getMetaInfo(
-  episodeIndex: number,
-  metadata: Episode[],
-  anifyTMDBMetadata: AnifyTMDBMetadata[]
-) {
-  const aniZipMeta = metadata.find(
-    (metaItem) => metaItem.episodeNumber === episodeIndex + 1
-  );
-
-  if (aniZipMeta) {
-    return aniZipMeta;
-  }
-
-  const tmdbMeta = anifyTMDBMetadata
-    .find((provider) => provider.providerId === 'tmdb')
-    ?.data.find((episode) => episode.number === episodeIndex + 1);
-
-  if (tmdbMeta) {
-    return {
-      title: { en: tmdbMeta.title },
-      summary: tmdbMeta.description,
-      image: tmdbMeta.img,
-      rating: tmdbMeta.rating.toString(),
-      length: 0,
-      airDateUtc: new Date(tmdbMeta.updatedAt).toISOString(),
-      seasonNumber: 1,
-      tvdbId: 0,
-    } as Episode;
-  }
-}
-
-function getEpisodeTitle(meta: Episode | undefined, index: number): string {
-  return (
-    meta?.title?.en ||
-    meta?.title?.['x-jat'] ||
-    meta?.title?.ja ||
-    `Episode ${index + 1}`
-  );
-}
-
-function getEpisodeDescription(meta: Episode | undefined): string {
-  return meta?.summary ?? meta?.overview ?? 'No Description';
-}
-
-function getThumbnail(episode: EpisodeData, meta: Episode | undefined): string {
-  return meta?.image ?? episode.img ?? episode.image ?? '';
-}
-
-async function mergeEpisodesWithMetadata(
-  episodeData: Episode[],
-  providerEpisodes: {
-    providerId: string;
-    sub: EpisodeData[];
-    dub: EpisodeData[];
-  }[],
-  anifyTMDBMetadata: AnifyTMDBMetadata[]
-) {
-  function mapSingleEpisode(
-    episode: EpisodeData,
-    index: number,
-    meta: Episode | undefined
-  ) {
-    return {
-      id: episode.id || episode.episodeId,
-      number: index + 1,
-      description: getEpisodeDescription(meta),
-      isFiller: episode.isFiller || false,
-      released: meta?.airDateUtc ?? '',
-      rating: meta?.rating ?? 0,
-      thumbnail: getThumbnail(episode, meta),
-      title: getEpisodeTitle(meta, index),
-      duration: meta?.length ?? episode.duration ?? 0,
-      season: meta?.seasonNumber ?? 1,
-      tvdbId: meta?.tvdbId ?? 0,
-    };
-  }
-
-  function mapEpisodes(episodes: EpisodeData[], metadata: Episode[]) {
-    return episodes.map((episode, index) =>
-      mapSingleEpisode(
-        episode,
-        index,
-        getMetaInfo(index, metadata, anifyTMDBMetadata)
-      )
-    );
-  }
-
-  return providerEpisodes.map((providerData) => ({
-    providerId: providerData.providerId,
-    episodes: {
-      sub: mapEpisodes(providerData.sub, episodeData),
-      dub: mapEpisodes(providerData.dub, episodeData),
-    },
-  }));
-}
-
-export const GET = async (
-  req: NextRequest,
-  { params }: { params: { id: string } }
-): Promise<NextResponse<EpisodeReturnType[]>> => {
-  const animeEpisodesPromise = safeAwait(fetchAnimeEpisodes(params.id));
-  const metadataPromise = safeAwait(fetchEpisodeData(params.id));
-  const anifyEpisodesPromise = safeAwait(fetchAnifyEpisodes(params.id));
-  const anifyTMDBMetadataPromise = safeAwait(fetchAnifyTMDBMetadata(params.id));
-
-  const [[episodes], [episodeData], [anifyEpisodes], [anifyTMDBMetadata]] =
-    await Promise.all([
-      animeEpisodesPromise,
-      metadataPromise,
-      anifyEpisodesPromise,
-      anifyTMDBMetadataPromise,
-    ]);
-
-  const anifyFormattedEpisodes = [
-    {
-      providerId: 'animepahe',
-      sub: anifyEpisodes?.animepahe?.episodes || [],
-      dub:
-        episodes?.find((p) => p.providerId === 'gogoanime')?.dub?.length !==
-          undefined &&
-        (episodes.find((p) => p.providerId === 'gogoanime')?.dub
-          ?.length as number) > 0
-          ? anifyEpisodes?.animepahe?.episodes.slice(
-              0,
-              episodes.find((p) => p.providerId === 'gogoanime')?.dub?.length ||
-                0
-            ) || []
-          : [],
-    },
-  ];
-
-  const [finalEpisodes] = await safeAwait(
-    mergeEpisodesWithMetadata(
-      episodeData as Episode[],
-      [...(episodes as any), ...(anifyFormattedEpisodes as any)],
-      anifyTMDBMetadata as AnifyTMDBMetadata[]
-    )
-  );
-
-  return NextResponse.json(finalEpisodes) as NextResponse<EpisodeReturnType[]>;
 };
+
+export const getEpisodes = async (id, status, refresh = false) => {
+  let cacheTime = null;
+  if (status) {
+    cacheTime = 60 * 60 * 3;
+  } else {
+    cacheTime = 60 * 60 * 24 * 45;
+  }
+
+  let meta = null;
+  let cached;
+
+  if (redis) {
+    try {
+      // // Find keys matching the pattern "meta:*"
+      // const keys = await redis.keys("meta:*");
+
+      // // Delete keys matching the pattern "meta:*"
+      // if (keys.length > 0) {
+      //   await redis.del(keys);
+      //   console.log(`Deleted ${keys.length} keys matching the pattern "meta:*"`);
+      // }
+      meta = await redis.get(`meta:${id}`);
+      if (JSON.parse(meta)?.length === 0) {
+        await redis.del(`meta:${id}`);
+        console.log("deleted meta cache");
+        meta = null;
+      }
+      cached = await redis.get(`episode:${id}`);
+      if (JSON.parse(cached)?.length === 0) {
+        await redis.del(`episode:${id}`);
+        cached = null;
+      }
+      let data;
+      if (refresh) {
+        data = await fetchAndCacheData(id, meta, redis, cacheTime, refresh);
+      }
+      if (data?.length > 0) {
+        console.log("deleted cache");
+        return data;
+      }
+
+      console.log("using redis");
+    } catch (error) {
+      console.error("Error checking Redis cache:", error.message);
+    }
+  }
+
+  if (cached) {
+    try {
+      let cachedData = JSON.parse(cached);
+      if (meta) {
+        cachedData = await CombineEpisodeMeta(cachedData, JSON.parse(meta));
+      }
+      return cachedData;
+    } catch (error) {
+      console.error("Error parsing cached data:", error.message);
+    }
+  } else {
+    const fetchdata = await fetchAndCacheData(
+      id,
+      meta,
+      redis,
+      cacheTime,
+      !refresh
+    );
+    return fetchdata;
+  }
+};
+
+
+function transformEpisodeId(episodeId) {
+  const regex = /^([^$]*)\$episode\$([^$]*)/;
+  const match = episodeId.match(regex);
+
+  if (match && match[1] && match[2]) {
+    return `${match[1]}?ep=${match[2]}`; // Construct the desired output with the episode number
+  }
+  return episodeId; // Return original ID if no match is found
+}
